@@ -6,6 +6,7 @@
  * @author      1412
  * @homepage    https://github.com/kid141252010/splayer-plugin-met-music
  * @updateUrl   https://raw.githubusercontent.com/kid141252010/splayer-plugin-met-music/main/meting-api.js
+ * @changelog   修复非母带偏好下服务端私自回退为臻品母带(AI00)导致文件过大的问题\n优化高阶音效未命中时的平滑降级逻辑
  * @type        source
  * @apiLevel    2
  */
