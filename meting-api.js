@@ -2,8 +2,10 @@
  * @name        MeT-Music
  * @id          dev.splayer.meting-api
  * @version     1.1.0
- * @description 基于 MeT-Music API 的 QQ音乐 音源插件（支持设置优先臻品母带/杜比全景声/Hi-Res/无损等音质）
+ * @description 基于 MeT-Music API 的 QQ音乐 音源插件（支持自定义服务端/优先臻品母带/杜比全景声/Hi-Res/无损等音质）
  * @author      1412
+ * @homepage    https://github.com/kid141252010/splayer-plugin-met-music
+ * @updateUrl   https://raw.githubusercontent.com/kid141252010/splayer-plugin-met-music/main/meting-api.js
  * @type        source
  * @apiLevel    2
  */
@@ -16,8 +18,16 @@ splayer.register({
       qualities: ["hi-res", "lossless", "hq", "sq", "lq"],
     },
   },
-  // 注入 SPlayer-Next 设置面板，允许用户在播放器界面自主选择扩展音质偏好
+  // 注入 SPlayer-Next 设置面板，允许用户在播放器界面自主配置
   settings: [
+    {
+      key: "apiUrl",
+      type: "text",
+      label: "API 基础地址",
+      description: "MeT-Music 服务端地址（例如：https://example.com:444）",
+      default: "",
+      placeholder: "https://your-met-music-api.com",
+    },
     {
       key: "preferredEffect",
       type: "select",
@@ -55,8 +65,9 @@ const SPLAYER_QUALITY_TO_API = {
 /**
  * 向 MeT-Music 请求单曲播放直链
  */
-async function fetchSongUrl(songId, level) {
-  const apiUrl = `https://music.met6.top:444/api/web/song/url/v1?id=${encodeURIComponent(songId)}&level=${encodeURIComponent(level)}&timestamp=${Date.now()}`;
+async function fetchSongUrl(baseUrl, songId, level) {
+  const cleanBase = baseUrl.replace(/\/+$/, "");
+  const apiUrl = `${cleanBase}/api/web/song/url/v1?id=${encodeURIComponent(songId)}&level=${encodeURIComponent(level)}&timestamp=${Date.now()}`;
   const resp = await splayer.request(apiUrl, { responseType: "json", timeout: 15000 });
   const item = resp.body?.data?.[0];
   return item?.url || "";
@@ -66,6 +77,14 @@ splayer.on("musicUrl", async (req) => {
   // 防御性校验源
   if (req.source && req.source !== "tx") {
     throw new Error(`[MeT-Music] 不支持的源类型: ${req.source}`);
+  }
+
+  const rawBaseUrl =
+    (typeof splayer.getSetting === "function" ? splayer.getSetting("apiUrl") : "") || "";
+  const baseUrl = String(rawBaseUrl).trim();
+
+  if (!baseUrl) {
+    throw new Error("[MeT-Music] 未配置 API 基础地址，请在 SPlayer 插件管理中点击「配置」填写服务端 URL");
   }
 
   const songId = req.musicInfo?.songmid || req.musicInfo?.id;
@@ -101,7 +120,7 @@ splayer.on("musicUrl", async (req) => {
   let finalUrl = "";
   for (const level of candidateLevels) {
     try {
-      finalUrl = await fetchSongUrl(songId, level);
+      finalUrl = await fetchSongUrl(baseUrl, songId, level);
       if (finalUrl) break;
     } catch {
       // 当前档位请求失败，平滑尝试下一个档位
