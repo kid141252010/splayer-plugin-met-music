@@ -1,7 +1,7 @@
 /**
  * @name        MeT-Music
  * @id          dev.splayer.meting-api
- * @version     1.1.0
+ * @version     1.1.1
  * @description 基于 MeT-Music API 的 QQ音乐 音源插件（支持自定义服务端/优先臻品母带/杜比全景声/Hi-Res/无损等音质）
  * @author      1412
  * @homepage    https://github.com/kid141252010/splayer-plugin-met-music
@@ -118,13 +118,30 @@ splayer.on("musicUrl", async (req) => {
   }
 
   let finalUrl = "";
+  let mismatchedMasterUrl = ""; // 记录被服务端强行降级为臻品母带的直链，仅在所有常规音质均无资源时兜底使用
+
   for (const level of candidateLevels) {
     try {
-      finalUrl = await fetchSongUrl(baseUrl, songId, level);
-      if (finalUrl) break;
+      const url = await fetchSongUrl(baseUrl, songId, level);
+      if (url) {
+        const fileName = (url.split("?")[0] || "").split("/").pop() || "";
+        // 若当前请求的并非臻品母带 (qai)，但服务端返回了以 AI00 开头的母带文件（如请求 da 时服务端私自回退为 AI00），
+        // 则视为当前档位未命中，跳过并继续尝试降级链中的标准无损/高品质音质
+        if (level !== "qai" && /^AI00/i.test(fileName)) {
+          if (!mismatchedMasterUrl) mismatchedMasterUrl = url;
+          continue;
+        }
+        finalUrl = url;
+        break;
+      }
     } catch {
       // 当前档位请求失败，平滑尝试下一个档位
     }
+  }
+
+  // 若常规音质全部未命中但存在母带，最后作为保底避免播放失败
+  if (!finalUrl && mismatchedMasterUrl) {
+    finalUrl = mismatchedMasterUrl;
   }
 
   if (!finalUrl) {
