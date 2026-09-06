@@ -1,11 +1,11 @@
 /**
  * @name        MeT-Music
  * @id          dev.splayer.meting-api
- * @version     1.0.2
- * @description 基于 MeT-Music API 的 QQ音乐 音源插件（支持 HQ/SQ/Hi-Res/杜比/臻品全景声/臻品母带等音质）
+ * @version     1.1.0
+ * @description 基于 MeT-Music API 的 QQ音乐 音源插件（支持设置优先臻品母带/杜比全景声/Hi-Res/无损等音质）
  * @author      1412
  * @type        source
- * @apiLevel    1
+ * @apiLevel    2
  */
 
 splayer.register({
@@ -16,47 +16,104 @@ splayer.register({
       qualities: ["hi-res", "lossless", "hq", "sq", "lq"],
     },
   },
+  // 注入 SPlayer-Next 设置面板，允许用户在播放器界面自主选择扩展音质偏好
+  settings: [
+    {
+      key: "preferredEffect",
+      type: "select",
+      label: "扩展音质偏好",
+      description: "播放高品质/Hi-Res时优先尝试获取的音质。如无资源将自动平滑降级",
+      default: "auto",
+      options: [
+        { label: "跟随播放器默认 (Hi-Res/SQ/HQ)", value: "auto" },
+        { label: "优先 臻品母带 (QAI)", value: "qai" },
+        { label: "优先 杜比全景声 (Dolby Atmos)", value: "da" },
+        { label: "优先 臻品全景声 V2 (Q360V2)", value: "q360v2" },
+        { label: "优先 360 Reality Audio (RA360)", value: "ra360" },
+        { label: "优先 DTS:X (DTSX)", value: "dtsx" },
+      ],
+    },
+  ],
 });
 
 /**
- * 音质 Level 映射表
- * 支持 SPlayer 标准音质标签与 API 扩展音质（HQ/SQ/RS/DTS/Q360V1/Q360V2/QAI/DTSX/RA360/DA）
+ * SPlayer-Next 官方 5 档标准音质到 MeT-Music API 的精确对齐表
+ * - hi-res   : 高解析度无损 (Hi-Res) -> API: rs
+ * - lossless : 标准无损 (16bit FLAC) -> API: sq
+ * - hq       : 极高有损 (320kbps MP3) -> API: hq
+ * - sq       : 标准有损 (SPlayer 中为 Standard Quality 192k) -> API: hq
+ * - lq       : 普通有损 (128kbps AAC/M4A) -> API: web
  */
-const QUALITY_MAP = {
-  // SPlayer 标准音质标签
+const SPLAYER_QUALITY_TO_API = {
   "hi-res": "rs",
   lossless: "sq",
   hq: "hq",
-  sq: "sq",
-  lq: "hq",
-
-  // API 原生音质级别（直接匹配）
-  rs: "rs",
-  dts: "dts",
-  q360v1: "q360v1",
-  q360v2: "q360v2",
-  qai: "qai",
-  dtsx: "dtsx",
-  ra360: "ra360",
-  da: "da",
+  sq: "hq",
+  lq: "web",
 };
 
-splayer.on("musicUrl", async (req) => {
-  const songId = req.musicInfo?.songmid || req.musicInfo?.id;
-  if (!songId) throw new Error("缺少歌曲 ID");
-
-  const qKey = String(req.quality || "").toLowerCase();
-  const level = QUALITY_MAP[qKey] || qKey || "hq";
-  const apiUrl = `https://music.met6.top:444/api/web/song/url/v1?id=${encodeURIComponent(songId)}&level=${encodeURIComponent(level)}&tamp=${Date.now()}`;
-
-  const resp = await splayer.request(apiUrl, { responseType: "json" });
+/**
+ * 向 MeT-Music 请求单曲播放直链
+ */
+async function fetchSongUrl(songId, level) {
+  const apiUrl = `https://music.met6.top:444/api/web/song/url/v1?id=${encodeURIComponent(songId)}&level=${encodeURIComponent(level)}&timestamp=${Date.now()}`;
+  const resp = await splayer.request(apiUrl, { responseType: "json", timeout: 15000 });
   const item = resp.body?.data?.[0];
-  const url = item?.url;
+  return item?.url || "";
+}
 
-  if (!url) throw new Error("获取音频链接失败");
+splayer.on("musicUrl", async (req) => {
+  // 防御性校验源
+  if (req.source && req.source !== "tx") {
+    throw new Error(`[MeT-Music] 不支持的源类型: ${req.source}`);
+  }
+
+  const songId = req.musicInfo?.songmid || req.musicInfo?.id;
+  if (!songId) throw new Error("[MeT-Music] 缺少歌曲 ID (songmid)");
+
+  const splayerQuality = String(req.quality || "hq").toLowerCase();
+  const preferredEffect =
+    (typeof splayer.getSetting === "function" ? splayer.getSetting("preferredEffect") : null) ||
+    "auto";
+
+  // 构建尝试音质候选队列：扩展音质偏好 -> 目标标准音质 -> 降级兜底队列
+  const candidateLevels = [];
+
+  // 当用户在插件配置中开启了高阶扩展音质，且当前播放等级为 hi-res 或 lossless 时优先尝试
+  if (preferredEffect !== "auto" && (splayerQuality === "hi-res" || splayerQuality === "lossless")) {
+    candidateLevels.push(preferredEffect);
+  }
+
+  // 加入当前播放器所请求的标准音质映射
+  const baseLevel = SPLAYER_QUALITY_TO_API[splayerQuality] || "hq";
+  if (!candidateLevels.includes(baseLevel)) {
+    candidateLevels.push(baseLevel);
+  }
+
+  // 兜底降级队列（若高音质无资源，平滑回退，确保 100% 播放成功）
+  const fallbackChain = ["sq", "hq", "web"];
+  for (const fb of fallbackChain) {
+    if (!candidateLevels.includes(fb)) {
+      candidateLevels.push(fb);
+    }
+  }
+
+  let finalUrl = "";
+  for (const level of candidateLevels) {
+    try {
+      finalUrl = await fetchSongUrl(songId, level);
+      if (finalUrl) break;
+    } catch {
+      // 当前档位请求失败，平滑尝试下一个档位
+    }
+  }
+
+  if (!finalUrl) {
+    throw new Error("[MeT-Music] 获取音频链接失败或歌曲未上架");
+  }
 
   return {
-    url,
+    url: finalUrl,
     quality: req.quality,
   };
 });
